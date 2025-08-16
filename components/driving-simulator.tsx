@@ -32,11 +32,12 @@ interface Particle {
   color: string
 }
 
-interface TireMark {
+interface RoadSegment {
   x: number
   y: number
-  angle: number
-  opacity: number
+  z: number
+  curve: number
+  width: number
 }
 
 export default function DrivingSimulator() {
@@ -52,8 +53,8 @@ export default function DrivingSimulator() {
   const lapStartTimeRef = useRef<number>(0)
 
   const carRef = useRef<Car>({
-    x: 400,
-    y: 300,
+    x: 0,
+    y: 0,
     angle: 0,
     speed: 0,
     maxSpeed: 8,
@@ -70,7 +71,9 @@ export default function DrivingSimulator() {
   })
 
   const particlesRef = useRef<Particle[]>([])
-  const tireMarksRef = useRef<TireMark[]>([])
+  const roadPositionRef = useRef(0)
+  const roadCurveRef = useRef(0)
+  const checkpointDistanceRef = useRef(0)
 
   const eventSourceRef = useRef<EventSource | null>(null)
 
@@ -87,7 +90,6 @@ export default function DrivingSimulator() {
         try {
           const data = JSON.parse(event.data)
 
-          // Only update controls if not a keep-alive message
           if (!data.keepAlive) {
             controlsRef.current = {
               up: data.up || false,
@@ -113,219 +115,158 @@ export default function DrivingSimulator() {
     }
   }, [])
 
-  const track = {
-    centerX: 400,
-    centerY: 300,
-    outerRadius: 200,
-    innerRadius: 120,
-    checkpoints: [
-      { x: 400, y: 100, passed: false },
-      { x: 600, y: 300, passed: false },
-      { x: 400, y: 500, passed: false },
-      { x: 200, y: 300, passed: false },
-    ],
-  }
+  const drawRoad = useCallback((ctx: CanvasRenderingContext2D) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
 
-  const createParticles = useCallback((x: number, y: number, angle: number, type: "exhaust" | "collision") => {
-    const particleCount = type === "exhaust" ? 3 : 8
-    const colors = type === "exhaust" ? ["#64748b", "#94a3b8", "#cbd5e1"] : ["#fbbf24", "#f59e0b", "#d97706"]
+    const width = canvas.width
+    const height = canvas.height
 
-    for (let i = 0; i < particleCount; i++) {
-      const particle: Particle = {
-        x: x + (Math.random() - 0.5) * 10,
-        y: y + (Math.random() - 0.5) * 10,
-        vx: Math.cos(angle + Math.PI + (Math.random() - 0.5) * 0.5) * (2 + Math.random() * 3),
-        vy: Math.sin(angle + Math.PI + (Math.random() - 0.5) * 0.5) * (2 + Math.random() * 3),
-        life: type === "exhaust" ? 30 : 60,
-        maxLife: type === "exhaust" ? 30 : 60,
-        color: colors[Math.floor(Math.random() * colors.length)],
+    const skyGradient = ctx.createLinearGradient(0, 0, 0, height * 0.6)
+    skyGradient.addColorStop(0, "#87CEEB")
+    skyGradient.addColorStop(0.7, "#98D8E8")
+    skyGradient.addColorStop(1, "#B0E0E6")
+    ctx.fillStyle = skyGradient
+    ctx.fillRect(0, 0, width, height * 0.6)
+
+    const groundGradient = ctx.createLinearGradient(0, height * 0.6, 0, height)
+    groundGradient.addColorStop(0, "#228B22")
+    groundGradient.addColorStop(1, "#006400")
+    ctx.fillStyle = groundGradient
+    ctx.fillRect(0, height * 0.6, width, height * 0.4)
+
+    const roadSegments = 100
+    const segmentLength = 200
+
+    for (let i = 0; i < roadSegments; i++) {
+      const z = i * segmentLength
+      const roadZ = roadPositionRef.current + z
+
+      let curve = 0
+      const curveFreq = 0.002
+      curve = Math.sin(roadZ * curveFreq) * 0.5 + Math.sin(roadZ * curveFreq * 2) * 0.3
+
+      const perspective = 300 / (z + 300)
+      const roadWidth = 200 * perspective
+      const roadHeight = 20 * perspective
+
+      const roadCenter = width / 2 + (curve - roadCurveRef.current) * perspective * 300
+
+      ctx.fillStyle = i % 2 === 0 ? "#404040" : "#383838"
+      const roadY = height * 0.6 + height * 0.4 * (1 - perspective)
+
+      ctx.fillRect(roadCenter - roadWidth / 2, roadY, roadWidth, roadHeight)
+
+      if (i % 3 === 0 && perspective > 0.1) {
+        ctx.fillStyle = "#FFFF00"
+        const markingWidth = 4 * perspective
+        ctx.fillRect(roadCenter - markingWidth / 2, roadY + roadHeight / 2, markingWidth, roadHeight / 4)
       }
-      particlesRef.current.push(particle)
+
+      ctx.fillStyle = "#FF0000"
+      ctx.fillRect(roadCenter - roadWidth / 2 - 10 * perspective, roadY, 5 * perspective, roadHeight)
+      ctx.fillRect(roadCenter + roadWidth / 2 + 5 * perspective, roadY, 5 * perspective, roadHeight)
     }
   }, [])
 
-  const drawCar = useCallback(
-    (ctx: CanvasRenderingContext2D, car: Car) => {
-      ctx.save()
-      ctx.translate(car.x, car.y)
-      ctx.rotate(car.angle)
+  const drawCar = useCallback((ctx: CanvasRenderingContext2D) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
 
-      // Shadow for depth
-      ctx.fillStyle = "rgba(0, 0, 0, 0.5)"
-      ctx.fillRect(-16, -8, 32, 16)
+    const carX = canvas.width / 2
+    const carY = canvas.height * 0.85
+    const carWidth = 80
+    const carHeight = 120
 
-      // Car body with gradient
-      const gradient = ctx.createLinearGradient(-18, -10, -18, 10)
-      gradient.addColorStop(0, "#ef4444")
-      gradient.addColorStop(0.5, "#dc2626")
-      gradient.addColorStop(1, "#b91c1c")
-      ctx.fillStyle = gradient
-      ctx.fillRect(-18, -10, 36, 20)
+    ctx.fillStyle = "rgba(0, 0, 0, 0.3)"
+    ctx.fillRect(carX - carWidth / 2 + 5, carY - carHeight + 5, carWidth, carHeight)
 
-      // White outline for visibility
-      ctx.strokeStyle = "#ffffff"
-      ctx.lineWidth = 2
-      ctx.strokeRect(-18, -10, 36, 20)
+    const carGradient = ctx.createLinearGradient(carX - carWidth / 2, carY - carHeight, carX + carWidth / 2, carY)
+    carGradient.addColorStop(0, "#FF4500")
+    carGradient.addColorStop(0.5, "#FF6347")
+    carGradient.addColorStop(1, "#FF4500")
+    ctx.fillStyle = carGradient
 
-      // Windows
-      ctx.fillStyle = "#1e293b"
-      ctx.fillRect(-12, -8, 24, 16)
-
-      // Headlights
-      ctx.shadowColor = "#fbbf24"
-      ctx.shadowBlur = 8
-      ctx.fillStyle = "#fbbf24"
-      ctx.fillRect(15, -8, 4, 6)
-      ctx.fillRect(15, 2, 4, 6)
-      ctx.shadowBlur = 0
-
-      // Create exhaust particles when moving fast
-      if (Math.abs(car.speed) > 2) {
-        createParticles(car.x - Math.cos(car.angle) * 20, car.y - Math.sin(car.angle) * 20, car.angle, "exhaust")
-      }
-
-      ctx.restore()
-    },
-    [createParticles],
-  )
-
-  const drawTrack = useCallback((ctx: CanvasRenderingContext2D) => {
-    const { centerX, centerY, outerRadius, innerRadius } = track
-
-    const trackGradient = ctx.createRadialGradient(centerX, centerY, innerRadius, centerX, centerY, outerRadius)
-    trackGradient.addColorStop(0, "#4b5563")
-    trackGradient.addColorStop(0.5, "#374151")
-    trackGradient.addColorStop(1, "#1f2937")
-    ctx.fillStyle = trackGradient
     ctx.beginPath()
-    ctx.arc(centerX, centerY, outerRadius, 0, Math.PI * 2)
+    ctx.moveTo(carX - carWidth / 2, carY)
+    ctx.lineTo(carX - carWidth / 3, carY - carHeight * 0.8)
+    ctx.lineTo(carX + carWidth / 3, carY - carHeight * 0.8)
+    ctx.lineTo(carX + carWidth / 2, carY)
+    ctx.closePath()
     ctx.fill()
 
-    const grassGradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, innerRadius)
-    grassGradient.addColorStop(0, "#22c55e")
-    grassGradient.addColorStop(1, "#16a34a")
-    ctx.fillStyle = grassGradient
-    ctx.beginPath()
-    ctx.arc(centerX, centerY, innerRadius, 0, Math.PI * 2)
-    ctx.fill()
+    ctx.fillStyle = "#FF6347"
+    ctx.fillRect(carX - carWidth / 3, carY - carHeight * 0.8, (carWidth * 2) / 3, carHeight * 0.3)
 
-    ctx.strokeStyle = "#fbbf24"
-    ctx.lineWidth = 3
-    ctx.beginPath()
-    ctx.arc(centerX, centerY, outerRadius - 2, 0, Math.PI * 2)
-    ctx.stroke()
-    ctx.beginPath()
-    ctx.arc(centerX, centerY, innerRadius + 2, 0, Math.PI * 2)
-    ctx.stroke()
+    ctx.fillStyle = "#1a1a2e"
+    ctx.fillRect(carX - carWidth / 4, carY - carHeight * 0.75, carWidth / 2, carHeight * 0.2)
 
-    ctx.strokeStyle = "#6b7280"
-    ctx.lineWidth = 2
-    ctx.setLineDash([10, 10])
-    ctx.beginPath()
-    ctx.arc(centerX, centerY, (outerRadius + innerRadius) / 2, 0, Math.PI * 2)
-    ctx.stroke()
-    ctx.setLineDash([])
+    ctx.fillStyle = "#FF0000"
+    ctx.fillRect(carX - carWidth / 2 + 5, carY - 15, 15, 10)
+    ctx.fillRect(carX + carWidth / 2 - 20, carY - 15, 15, 10)
 
-    track.checkpoints.forEach((checkpoint, index) => {
-      const time = Date.now() * 0.005
-      const pulse = Math.sin(time + index) * 0.3 + 0.7
-
-      ctx.fillStyle = checkpoint.passed ? "#10b981" : "#f59e0b"
-      ctx.beginPath()
-      ctx.arc(checkpoint.x, checkpoint.y, 8 * pulse, 0, Math.PI * 2)
-      ctx.fill()
-
-      ctx.shadowColor = checkpoint.passed ? "#10b981" : "#f59e0b"
-      ctx.shadowBlur = 10
-      ctx.fillStyle = "#ffffff"
-      ctx.font = "bold 12px sans-serif"
-      ctx.textAlign = "center"
-      ctx.fillText((index + 1).toString(), checkpoint.x, checkpoint.y + 4)
-      ctx.shadowBlur = 0
-    })
-  }, [])
-
-  const drawTireMarks = useCallback((ctx: CanvasRenderingContext2D) => {
-    tireMarksRef.current.forEach((mark, index) => {
-      ctx.save()
-      ctx.globalAlpha = mark.opacity
-      ctx.translate(mark.x, mark.y)
-      ctx.rotate(mark.angle)
-      ctx.fillStyle = "#1f2937"
-      ctx.fillRect(-8, -1, 16, 2)
-      ctx.restore()
-
-      mark.opacity -= 0.005
-      if (mark.opacity <= 0) {
-        tireMarksRef.current.splice(index, 1)
+    if (controlsRef.current.up && carRef.current.speed > 1) {
+      for (let i = 0; i < 3; i++) {
+        ctx.fillStyle = `rgba(100, 100, 100, ${0.3 - i * 0.1})`
+        ctx.beginPath()
+        ctx.arc(carX + (Math.random() - 0.5) * 20, carY + 10 + i * 15, 5 + i * 3, 0, Math.PI * 2)
+        ctx.fill()
       }
-    })
-  }, [])
-
-  const drawParticles = useCallback((ctx: CanvasRenderingContext2D) => {
-    particlesRef.current.forEach((particle, index) => {
-      ctx.save()
-      ctx.globalAlpha = particle.life / particle.maxLife
-      ctx.fillStyle = particle.color
-      ctx.beginPath()
-      ctx.arc(particle.x, particle.y, 2, 0, Math.PI * 2)
-      ctx.fill()
-      ctx.restore()
-
-      particle.x += particle.vx
-      particle.y += particle.vy
-      particle.vx *= 0.98
-      particle.vy *= 0.98
-      particle.life--
-
-      if (particle.life <= 0) {
-        particlesRef.current.splice(index, 1)
-      }
-    })
+    }
   }, [])
 
   const drawHUD = useCallback(
     (ctx: CanvasRenderingContext2D, car: Car) => {
+      const canvas = canvasRef.current
+      if (!canvas) return
+
       const speed = Math.abs(car.speed)
-      const speedKmh = Math.round(speed * 15)
+      const speedKmh = Math.round(speed * 20)
 
-      ctx.fillStyle = "rgba(0, 0, 0, 0.7)"
-      ctx.fillRect(650, 450, 140, 140)
-      ctx.strokeStyle = "#374151"
-      ctx.lineWidth = 2
-      ctx.strokeRect(650, 450, 140, 140)
-
-      const centerX = 720
-      const centerY = 520
+      const speedometerX = canvas.width - 120
+      const speedometerY = canvas.height - 120
       const radius = 50
 
-      ctx.strokeStyle = "#ef4444"
+      ctx.fillStyle = "rgba(0, 0, 0, 0.8)"
+      ctx.beginPath()
+      ctx.arc(speedometerX, speedometerY, radius + 10, 0, Math.PI * 2)
+      ctx.fill()
+
+      ctx.strokeStyle = "#00FF00"
       ctx.lineWidth = 8
       ctx.beginPath()
-      ctx.arc(centerX, centerY, radius, Math.PI, Math.PI + (speed / car.maxSpeed) * Math.PI)
+      ctx.arc(speedometerX, speedometerY, radius, -Math.PI / 2, -Math.PI / 2 + (speed / car.maxSpeed) * Math.PI * 1.5)
       ctx.stroke()
 
-      ctx.fillStyle = "#ffffff"
-      ctx.font = "bold 24px sans-serif"
+      ctx.fillStyle = "#FFFFFF"
+      ctx.font = "bold 20px Arial"
       ctx.textAlign = "center"
-      ctx.fillText(speedKmh.toString(), centerX, centerY + 8)
-      ctx.font = "12px sans-serif"
-      ctx.fillText("km/h", centerX, centerY + 25)
+      ctx.fillText(speedKmh.toString(), speedometerX, speedometerY + 5)
+      ctx.font = "12px Arial"
+      ctx.fillText("KM/H", speedometerX, speedometerY + 20)
 
-      ctx.fillStyle = "rgba(0, 0, 0, 0.7)"
-      ctx.fillRect(10, 10, 200, 80)
-      ctx.strokeStyle = "#374151"
-      ctx.lineWidth = 2
-      ctx.strokeRect(10, 10, 200, 80)
+      ctx.fillStyle = "rgba(0, 0, 0, 0.8)"
+      ctx.fillRect(20, 20, 200, 80)
 
-      ctx.fillStyle = "#ffffff"
-      ctx.font = "bold 16px sans-serif"
+      ctx.fillStyle = "#FFFFFF"
+      ctx.font = "bold 16px Arial"
       ctx.textAlign = "left"
-      ctx.fillText(`Lap: ${currentLap}`, 20, 35)
-      ctx.fillText(`Time: ${(lapTime / 1000).toFixed(1)}s`, 20, 55)
+      ctx.fillText(`LAP: ${currentLap}`, 30, 45)
+      ctx.fillText(`TIME: ${(lapTime / 1000).toFixed(1)}s`, 30, 65)
       if (bestLapTime > 0) {
-        ctx.fillText(`Best: ${(bestLapTime / 1000).toFixed(1)}s`, 20, 75)
+        ctx.fillText(`BEST: ${(bestLapTime / 1000).toFixed(1)}s`, 30, 85)
       }
+
+      const checkpointProgress = (checkpointDistanceRef.current % 1000) / 1000
+      ctx.fillStyle = "rgba(255, 255, 0, 0.8)"
+      ctx.fillRect(canvas.width / 2 - 50, 30, 100 * checkpointProgress, 10)
+      ctx.strokeStyle = "#FFFFFF"
+      ctx.strokeRect(canvas.width / 2 - 50, 30, 100, 10)
+
+      ctx.fillStyle = "#FFFFFF"
+      ctx.font = "12px Arial"
+      ctx.textAlign = "center"
+      ctx.fillText("CHECKPOINT", canvas.width / 2, 55)
     },
     [lapTime, bestLapTime, currentLap],
   )
@@ -350,71 +291,40 @@ export default function DrivingSimulator() {
       car.speed *= car.friction
     }
 
+    roadPositionRef.current += car.speed * 10
+
     if (Math.abs(car.speed) > 0.1) {
-      const turnMultiplier = Math.min(Math.abs(car.speed) / car.maxSpeed, 1)
       if (controls.left) {
-        car.angle -= car.turnSpeed * turnMultiplier
-        if (Math.abs(car.speed) > 3) {
-          tireMarksRef.current.push({
-            x: car.x - Math.cos(car.angle + Math.PI / 2) * 8,
-            y: car.y - Math.sin(car.angle + Math.PI / 2) * 8,
-            angle: car.angle,
-            opacity: 0.6,
-          })
-        }
+        roadCurveRef.current -= 0.02 * Math.abs(car.speed)
       }
       if (controls.right) {
-        car.angle += car.turnSpeed * turnMultiplier
-        if (Math.abs(car.speed) > 3) {
-          tireMarksRef.current.push({
-            x: car.x + Math.cos(car.angle + Math.PI / 2) * 8,
-            y: car.y + Math.sin(car.angle + Math.PI / 2) * 8,
-            angle: car.angle,
-            opacity: 0.6,
-          })
-        }
+        roadCurveRef.current += 0.02 * Math.abs(car.speed)
       }
     }
 
-    car.x += Math.cos(car.angle) * car.speed
-    car.y += Math.sin(car.angle) * car.speed
+    checkpointDistanceRef.current += Math.abs(car.speed) * 10
 
-    const distanceFromCenter = Math.sqrt(Math.pow(car.x - track.centerX, 2) + Math.pow(car.y - track.centerY, 2))
+    if (checkpointDistanceRef.current > 1000) {
+      checkpointDistanceRef.current = 0
+      setScore((prev) => prev + 100)
 
-    if (distanceFromCenter > track.outerRadius - 15 || distanceFromCenter < track.innerRadius + 15) {
-      createParticles(car.x, car.y, car.angle, "collision")
-      car.speed *= 0.3
-      const angleToCenter = Math.atan2(track.centerY - car.y, track.centerX - car.x)
-      car.x += Math.cos(angleToCenter) * 2
-      car.y += Math.sin(angleToCenter) * 2
-    }
+      if (Math.floor(roadPositionRef.current / 1000) % 4 === 0 && roadPositionRef.current > 0) {
+        const currentTime = Date.now()
+        const lapTimeMs = currentTime - lapStartTimeRef.current
 
-    track.checkpoints.forEach((checkpoint, index) => {
-      const distance = Math.sqrt(Math.pow(car.x - checkpoint.x, 2) + Math.pow(car.y - checkpoint.y, 2))
-
-      if (distance < 20 && !checkpoint.passed) {
-        checkpoint.passed = true
-        setScore((prev) => prev + 100)
-
-        if (index === 0 && track.checkpoints.slice(1).every((cp) => cp.passed)) {
-          const currentTime = Date.now()
-          const lapTimeMs = currentTime - lapStartTimeRef.current
-
-          if (lapStartTimeRef.current > 0) {
-            setLapTime(lapTimeMs)
-            if (bestLapTime === 0 || lapTimeMs < bestLapTime) {
-              setBestLapTime(lapTimeMs)
-            }
-            setCurrentLap((prev) => prev + 1)
-            setScore((prev) => prev + 1000)
+        if (lapStartTimeRef.current > 0) {
+          setLapTime(lapTimeMs)
+          if (bestLapTime === 0 || lapTimeMs < bestLapTime) {
+            setBestLapTime(lapTimeMs)
           }
-
-          lapStartTimeRef.current = currentTime
-          track.checkpoints.forEach((cp) => (cp.passed = false))
+          setCurrentLap((prev) => prev + 1)
+          setScore((prev) => prev + 1000)
         }
+
+        lapStartTimeRef.current = currentTime
       }
-    })
-  }, [createParticles, isRemoteControlled])
+    }
+  }, [isRemoteControlled, bestLapTime])
 
   const gameLoop = useCallback(() => {
     const canvas = canvasRef.current
@@ -423,18 +333,13 @@ export default function DrivingSimulator() {
     const ctx = canvas.getContext("2d")
     if (!ctx) return
 
-    const bgGradient = ctx.createRadialGradient(400, 300, 0, 400, 300, 600)
-    bgGradient.addColorStop(0, "#1e293b")
-    bgGradient.addColorStop(1, "#0f172a")
-    ctx.fillStyle = bgGradient
-    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
 
-    drawTrack(ctx)
-    drawTireMarks(ctx)
-    drawParticles(ctx)
-    updateCar()
-    drawCar(ctx, carRef.current)
+    drawRoad(ctx)
+    drawCar(ctx)
     drawHUD(ctx, carRef.current)
+
+    updateCar()
 
     if (isRunning && lapStartTimeRef.current > 0) {
       setLapTime(Date.now() - lapStartTimeRef.current)
@@ -443,7 +348,79 @@ export default function DrivingSimulator() {
     if (isRunning) {
       animationRef.current = requestAnimationFrame(gameLoop)
     }
-  }, [isRunning, drawTrack, drawTireMarks, drawParticles, drawCar, drawHUD, updateCar])
+  }, [isRunning, drawRoad, drawCar, drawHUD, updateCar])
+
+  const startGame = () => {
+    setIsRunning(true)
+    setScore(0)
+    setLapTime(0)
+    setCurrentLap(1)
+    lapStartTimeRef.current = Date.now()
+
+    carRef.current = {
+      x: 0,
+      y: 0,
+      angle: 0,
+      speed: 0,
+      maxSpeed: 8,
+      acceleration: 0.3,
+      friction: 0.95,
+      turnSpeed: 0.05,
+    }
+
+    roadPositionRef.current = 0
+    roadCurveRef.current = 0
+    checkpointDistanceRef.current = 0
+    particlesRef.current = []
+  }
+
+  const stopGame = () => {
+    setIsRunning(false)
+    if (animationRef.current) {
+      cancelAnimationFrame(animationRef.current)
+    }
+  }
+
+  const toggleRemoteControl = () => {
+    setIsRemoteControlled(!isRemoteControlled)
+    if (!isRemoteControlled && !eventSourceRef.current) {
+      connectEventSource()
+    }
+  }
+
+  useEffect(() => {
+    if (isRemoteControlled && !eventSourceRef.current) {
+      connectEventSource()
+    }
+
+    return () => {
+      if (eventSourceRef.current && !isRemoteControlled) {
+        eventSourceRef.current.close()
+        eventSourceRef.current = null
+      }
+    }
+  }, [isRemoteControlled])
+
+  useEffect(() => {
+    if (isRunning) {
+      gameLoop()
+    }
+    return () => {
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current)
+      }
+    }
+  }, [isRunning])
+
+  useEffect(() => {
+    window.addEventListener("keydown", handleKeyDown)
+    window.addEventListener("keyup", handleKeyUp)
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown)
+      window.removeEventListener("keyup", handleKeyUp)
+    }
+  }, [])
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     switch (e.key) {
@@ -494,77 +471,6 @@ export default function DrivingSimulator() {
         break
     }
   }, [])
-
-  const startGame = () => {
-    setIsRunning(true)
-    setScore(0)
-    setLapTime(0)
-    setCurrentLap(1)
-    lapStartTimeRef.current = Date.now()
-
-    carRef.current = {
-      x: 400,
-      y: 100,
-      angle: Math.PI / 2,
-      speed: 0,
-      maxSpeed: 8,
-      acceleration: 0.3,
-      friction: 0.95,
-      turnSpeed: 0.05,
-    }
-
-    track.checkpoints.forEach((cp) => (cp.passed = false))
-    particlesRef.current = []
-    tireMarksRef.current = []
-  }
-
-  const stopGame = () => {
-    setIsRunning(false)
-    if (animationRef.current) {
-      cancelAnimationFrame(animationRef.current)
-    }
-  }
-
-  const toggleRemoteControl = () => {
-    setIsRemoteControlled(!isRemoteControlled)
-    if (!isRemoteControlled && !eventSourceRef.current) {
-      connectEventSource()
-    }
-  }
-
-  useEffect(() => {
-    if (isRemoteControlled && !eventSourceRef.current) {
-      connectEventSource()
-    }
-
-    return () => {
-      if (eventSourceRef.current && !isRemoteControlled) {
-        eventSourceRef.current.close()
-        eventSourceRef.current = null
-      }
-    }
-  }, [isRemoteControlled])
-
-  useEffect(() => {
-    if (isRunning) {
-      gameLoop()
-    }
-    return () => {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current)
-      }
-    }
-  }, [isRunning, gameLoop])
-
-  useEffect(() => {
-    window.addEventListener("keydown", handleKeyDown)
-    window.addEventListener("keyup", handleKeyUp)
-
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown)
-      window.removeEventListener("keyup", handleKeyUp)
-    }
-  }, [handleKeyDown, handleKeyUp])
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -641,11 +547,10 @@ export default function DrivingSimulator() {
         <div className="mt-4 text-slate-300 text-sm">
           <p>
             <strong>Controls:</strong> {isRemoteControlled ? "Use mobile controller" : "WASD or Arrow Keys"} - Drive
-            through all checkpoints to complete laps!
+            forward and steer left/right!
           </p>
           <p>
-            <strong>Features:</strong> Real-time speedometer, lap timing, tire marks, particle effects, and mobile
-            remote control
+            <strong>Features:</strong> 3D perspective view, realistic speedometer, lap timing, and mobile remote control
           </p>
         </div>
       </Card>
